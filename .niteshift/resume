@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Runs on every resume, before `ns services up` restores the services.
+#
+# The `stack` service is `docker compose up`, so it crash-loops if the Docker
+# daemon has not finished coming back after the sandbox thaws. Wait for it (and
+# nudge systemd if it is not running) so compose starts against a live daemon.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+for attempt in $(seq 1 60); do
+  if docker info >/dev/null 2>&1; then
+    echo "Docker daemon is up (after ${attempt}s)"
+    exit 0
+  fi
+  if [ "$attempt" = 5 ]; then
+    echo "Docker daemon still down, asking systemd to start it"
+    systemctl start docker >/dev/null 2>&1 || true
+  fi
+  sleep 1
+done
+
+echo "Docker daemon did not become available; the 'stack' service will retry" >&2
