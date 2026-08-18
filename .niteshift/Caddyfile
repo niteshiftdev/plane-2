@@ -1,0 +1,54 @@
+{
+	# 2019 is reserved by the Niteshift sandbox, so Caddy's admin API stays off.
+	admin off
+	auto_https off
+	servers {
+		max_header_size 25MB
+		client_ip_headers X-Forwarded-For X-Real-IP
+		trusted_proxies static 0.0.0.0/0
+	}
+}
+
+# Single-origin entrypoint for the whole Plane stack, mirroring the routing of
+# apps/proxy/Caddyfile.ce but pointing at the host ports the dev servers and the
+# Docker stack bind to. Everything the browser talks to is same-origin, so
+# session cookies and CSRF work through one preview URL.
+:4000 {
+	request_body {
+		max_size {$FILE_SIZE_LIMIT:5242880}
+	}
+
+	# The preview panel embeds this origin in an iframe on niteshift.dev.
+	header {
+		-X-Frame-Options
+		Content-Security-Policy "frame-ancestors 'self' https://niteshift.dev https://*.niteshift.dev"
+	}
+
+	# Django API, authentication flow and collected static files
+	reverse_proxy /api/* localhost:8000
+	reverse_proxy /auth/* localhost:8000
+	reverse_proxy /static/* localhost:8000
+
+	# MinIO object storage (bucket name "uploads")
+	reverse_proxy /uploads localhost:9000
+	reverse_proxy /uploads/* localhost:9000
+
+	# Live collaboration server (hocuspocus, websockets)
+	reverse_proxy /live/* localhost:3100
+
+	# Vite dev servers reject unknown Host headers, so rewrite Host to the
+	# upstream for every app served by react-router dev.
+	redir /god-mode /god-mode/ permanent
+	reverse_proxy /god-mode/* localhost:3001 {
+		header_up Host {upstream_hostport}
+	}
+
+	redir /spaces /spaces/ permanent
+	reverse_proxy /spaces/* localhost:3002 {
+		header_up Host {upstream_hostport}
+	}
+
+	reverse_proxy /* localhost:3000 {
+		header_up Host {upstream_hostport}
+	}
+}
