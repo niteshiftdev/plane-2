@@ -1,0 +1,30 @@
+# Plane runs as three supervised process trees:
+#   backend  — the docker-compose-local.yml stack (postgres, valkey, rabbitmq, minio,
+#              api on 8000, celery worker, celery beat, and the one-shot migrator)
+#   frontend — turbo dev: web (3000), admin (3001), space (3002), live (3100)
+#   proxy    — Caddy, the single browser origin in front of all of the above
+#
+# Only the proxy declares a port, so the preview is one URL that serves the whole
+# product: / (web), /god-mode (admin), /spaces (space), /live, /api and /auth.
+services:
+  - name: backend
+    command: docker compose -f docker-compose-local.yml -f docker-compose.niteshift.yml up
+    # Compose needs room to stop eight containers; the default 10s kills it midway.
+    stopGracePeriod: 2m
+
+  - name: frontend
+    # apps/live opens Redis once at boot and exits for good if it is refused, while
+    # its tsdown watcher keeps running — so the supervisor would never notice. Wait
+    # for the valkey container the backend service brings up before starting turbo.
+    command: |
+      for _ in $(seq 1 90); do
+        (exec 3<>/dev/tcp/127.0.0.1/6379) 2>/dev/null && break
+        sleep 2
+      done
+      exec pnpm dev
+    # Four Vite dev servers plus package watchers take a while to wind down.
+    stopGracePeriod: 30s
+
+  - name: proxy
+    command: caddy run --adapter caddyfile --config Caddyfile.niteshift
+    port: 4000
