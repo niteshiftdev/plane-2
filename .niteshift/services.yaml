@@ -8,7 +8,7 @@
 # product: / (web), /god-mode (admin), /spaces (space), /live, /api and /auth.
 services:
   - name: backend
-    command: docker compose -f docker-compose-local.yml -f docker-compose.niteshift.yml up
+    command: docker compose -f docker-compose-local.yml up
     # Compose needs room to stop eight containers; the default 10s kills it midway.
     stopGracePeriod: 2m
 
