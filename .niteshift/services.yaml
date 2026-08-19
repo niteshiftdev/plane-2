@@ -1,0 +1,21 @@
+# Niteshift services for Plane.
+#
+# backend  — the project's own compose stack (postgres, valkey, rabbitmq, minio,
+#            Django API + celery worker/beat + migrator), adapted for the
+#            sandbox by the override .niteshift/setup generates.
+# frontend — `pnpm dev`: turbo runs the web (:3000), admin (:3001), space
+#            (:3002) and live (:3100) dev servers plus the package watchers.
+# proxy    — Caddy on :4000, the single browser origin in front of all of them.
+services:
+  - name: backend
+    command: docker compose -f docker-compose-local.yml -f docker-compose.niteshift.yml up
+    stopGracePeriod: 60s
+
+  - name: frontend
+    command: pnpm dev
+    stopGracePeriod: 30s
+
+  - name: proxy
+    command: 'docker rm -f plane-proxy >/dev/null 2>&1; exec docker run --rm --name plane-proxy --network=host -v "$PWD/Caddyfile.niteshift:/etc/caddy/Caddyfile:ro" caddy:2-alpine caddy run --config /etc/caddy/Caddyfile'
+    port: 4000
+    stopGracePeriod: 15s
