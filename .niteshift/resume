@@ -8,8 +8,8 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-DEV_EMAIL="dev@plane.local"
-DEV_PASSWORD="Plane@12345"
+# The root environment file survives suspension and owns the preview account.
+source .env
 
 echo "==> Waiting for the backend stack"
 ns services start plane-backend

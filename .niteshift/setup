@@ -10,15 +10,13 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-COMPOSE=(docker compose -f docker-compose-local.yml -f .niteshift/docker-compose.niteshift.yml)
-
-DEV_EMAIL="dev@plane.local"
-DEV_PASSWORD="Plane@12345"
-DEV_WORKSPACE="dev-workspace"
-
 echo "==> Materializing root environment file"
 cp .niteshift/.env.niteshift .env
 chmod 600 .env
+# Setup consumes the same environment file as the repository services.
+source .env
+
+COMPOSE=(docker compose -f docker-compose-local.yml -f .niteshift/docker-compose.niteshift.yml)
 
 echo "==> Installing node dependencies"
 corepack enable pnpm
