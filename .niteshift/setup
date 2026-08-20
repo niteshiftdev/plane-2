@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+# Niteshift environment setup for Plane.
+#
+# Mirrors the documented local workflow (./setup.sh -> docker compose -f
+# docker-compose-local.yml up -> pnpm dev) with two Niteshift adaptations:
+#   * every app is served from a single origin by a Caddy reverse proxy so the
+#     preview panel needs only one port, and
+#   * the instance is pre-configured with a dev user, workspace and sample data.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+# Also hard-coded in the Caddyfile below and in .niteshift/services.yaml.
+PREVIEW_PORT=3030
+# NITESHIFT_PORT_3030_URL only exists once the manifest is committed; fall back
+# to localhost so the very first task still renders a coherent instance.
+BASE_ORIGIN="${NITESHIFT_PORT_3030_URL:-http://localhost:${PREVIEW_PORT}}"
+COMPOSE=(docker compose -f docker-compose-local.yml -f docker-compose.niteshift.yml)
+
+# Dev-only secrets. They sign nothing outside this sandbox's own database, and
+# they are deliberately fixed so sessions survive setup re-runs and resumes.
+DJANGO_SECRET_KEY="niteshift-dev-only-django-secret-key-not-for-production"
+LIVE_SECRET_KEY="niteshift-dev-only-live-server-secret"
+
+DEV_EMAIL="dev@plane.local"
+DEV_PASSWORD="Plane@12345"
+DEV_WORKSPACE="dev-workspace"
+
+CORS_ORIGINS="$BASE_ORIGIN"
+if [ "$BASE_ORIGIN" != "http://localhost:${PREVIEW_PORT}" ]; then
+  CORS_ORIGINS="${BASE_ORIGIN},http://localhost:${PREVIEW_PORT}"
+fi
+
+# Render <app>/.env from the tracked .env.example, dropping the keys we override
+# so newly added upstream variables keep their defaults.
+write_env() {
+  local example="$1" out="$2" overrides="$3" keys
+  keys=$(printf '%s\n' "$overrides" | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | paste -sd'|' -)
+  grep -Ev "^[[:space:]]*(${keys})[[:space:]]*=" "$example" > "$out"
+  printf '\n# --- Niteshift overrides ---\n%s\n' "$overrides" >> "$out"
+}
+
+git_exclude() {
+  mkdir -p .git/info
+  grep -qxF "$1" .git/info/exclude 2>/dev/null || printf '%s\n' "$1" >> .git/info/exclude
+}
+
+echo "==> Rendering environment files (origin: ${BASE_ORIGIN})"
+
+cp .env.example .env
+
+# Every browser-facing URL is relative: the proxy serves web, admin, space, live
+# and the API from one origin, exactly like the self-hosted proxy deployment.
+FRONTEND_ENV='VITE_API_BASE_URL=""
+VITE_WEB_BASE_URL=""
+VITE_WEB_BASE_PATH=""
+VITE_ADMIN_BASE_URL=""
+VITE_ADMIN_BASE_PATH="/god-mode"
+VITE_SPACE_BASE_URL=""
+VITE_SPACE_BASE_PATH="/spaces"
+VITE_LIVE_BASE_URL=""
+VITE_LIVE_BASE_PATH="/live"'
+for app in web admin space; do
+  write_env "apps/${app}/.env.example" "apps/${app}/.env" "$FRONTEND_ENV"
+done
+
+write_env apps/live/.env.example apps/live/.env "PORT=3100
+API_BASE_URL=\"http://localhost:8000\"
+WEB_BASE_URL=\"${BASE_ORIGIN}\"
+LIVE_BASE_URL=\"${BASE_ORIGIN}\"
+LIVE_BASE_PATH=\"/live\"
+LIVE_SERVER_SECRET_KEY=\"${LIVE_SECRET_KEY}\"
+REDIS_HOST=\"localhost\"
+REDIS_PORT=6379
+REDIS_URL=\"redis://localhost:6379/\""
+
+# The API redirects the browser to absolute URLs after sign-in and builds
+# presigned upload URLs from the request host, so it needs the preview origin.
+write_env apps/api/.env.example apps/api/.env "DEBUG=1
+SECRET_KEY=\"${DJANGO_SECRET_KEY}\"
+CORS_ALLOWED_ORIGINS=\"${CORS_ORIGINS}\"
+POSTGRES_HOST=\"plane-db\"
+DATABASE_URL=\"postgresql://plane:plane@plane-db:5432/plane\"
+REDIS_HOST=\"plane-redis\"
+REDIS_URL=\"redis://plane-redis:6379/\"
+USE_MINIO=0
+AWS_S3_ENDPOINT_URL=\"http://plane-minio:9000\"
+WEB_URL=\"${BASE_ORIGIN}\"
+APP_BASE_URL=\"${BASE_ORIGIN}\"
+APP_BASE_PATH=\"\"
+ADMIN_BASE_URL=\"\"
+ADMIN_BASE_PATH=\"/god-mode\"
+SPACE_BASE_URL=\"\"
+SPACE_BASE_PATH=\"/spaces\"
+LIVE_BASE_URL=\"${BASE_ORIGIN}\"
+LIVE_BASE_PATH=\"/live\"
+LIVE_SERVER_SECRET_KEY=\"${LIVE_SECRET_KEY}\""
+
+echo "==> Writing the preview reverse proxy"
+
+# Modelled on apps/proxy/Caddyfile.ce, retargeted at the dev servers: the Vite
+# apps run natively on loopback, so the proxy container uses host networking.
+# Django sends X-Frame-Options: DENY, which would blank the preview iframe, so
+# the proxy replaces it with a frame-ancestors policy for every upstream at once.
+cat > Caddyfile.niteshift <<'CADDY'
+{
+	admin off
+	auto_https off
+	servers {
+		max_header_size 25MB
+		client_ip_headers X-Forwarded-For X-Real-IP
+		trusted_proxies static 0.0.0.0/0
+	}
+}
+
+:3030 {
+	request_body {
+		max_size {$FILE_SIZE_LIMIT:5242880}
+	}
+
+	header {
+		-X-Frame-Options
+		Content-Security-Policy "frame-ancestors 'self' https://niteshift.dev https://*.niteshift.dev"
+	}
+
+	# Every upstream gets a rewritten Host: Vite refuses unknown hosts, and
+	# Django rejects the preview hostname outright because the task id in it
+	# contains an underscore (RFC 1034/1035). CORS_ALLOWED_ORIGINS carries the
+	# real origin through to Django's CSRF check instead.
+	redir /god-mode /god-mode/ permanent
+	reverse_proxy /god-mode/* 127.0.0.1:3001 {
+		header_up Host {upstream_hostport}
+	}
+
+	redir /spaces /spaces/ permanent
+	reverse_proxy /spaces/* 127.0.0.1:3002 {
+		header_up Host {upstream_hostport}
+	}
+
+	reverse_proxy /live/* 127.0.0.1:3100 {
+		header_up Host {upstream_hostport}
+	}
+
+	reverse_proxy /api/* 127.0.0.1:8000 {
+		header_up Host localhost:3030
+	}
+
+	reverse_proxy /auth/* 127.0.0.1:8000 {
+		header_up Host localhost:3030
+	}
+
+	reverse_proxy /static/* 127.0.0.1:8000 {
+		header_up Host localhost:3030
+	}
+
+	reverse_proxy /uploads 127.0.0.1:9000
+	reverse_proxy /uploads/* 127.0.0.1:9000
+
+	reverse_proxy /* 127.0.0.1:3000 {
+		header_up Host {upstream_hostport}
+	}
+}
+CADDY
+
+cat > docker-compose.niteshift.yml <<'COMPOSE'
+services:
+  plane-proxy:
+    image: caddy:2.11.3-alpine
+    restart: unless-stopped
+    # Host networking: the web/admin/space/live dev servers bind 127.0.0.1.
+    network_mode: host
+    command: caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    volumes:
+      - ./Caddyfile.niteshift:/etc/caddy/Caddyfile:ro
+    environment:
+      FILE_SIZE_LIMIT: ${FILE_SIZE_LIMIT:-5242880}
+COMPOSE
+
+git_exclude Caddyfile.niteshift
+git_exclude docker-compose.niteshift.yml
+
+echo "==> Installing node dependencies"
+corepack enable pnpm
+pnpm install --frozen-lockfile
+
+echo "==> Building workspace packages"
+# turbo run dev depends on ^build; pre-building keeps the dev servers fast to start.
+pnpm turbo run build --filter='./packages/*'
+
+echo "==> Building the API image"
+"${COMPOSE[@]}" build
+
+echo "==> Starting the backend stack"
+ns services start plane-backend
+curl -sf --retry 90 --retry-delay 2 --retry-connrefused --retry-all-errors \
+  -o /dev/null http://localhost:8000/api/instances/
+
+echo "==> Seeding the instance"
+"${COMPOSE[@]}" exec -T \
+  -e SEED_EMAIL="$DEV_EMAIL" -e SEED_PASSWORD="$DEV_PASSWORD" -e SEED_WORKSPACE="$DEV_WORKSPACE" \
+  api python manage.py shell --settings=plane.settings.local <<'PY'
+import os
+import uuid
+
+from plane.bgtasks.dummy_data_task import create_dummy_data
+from plane.db.models import Profile, Project, User, Workspace, WorkspaceMember
+from plane.license.models import Instance, InstanceAdmin
+
+email = os.environ["SEED_EMAIL"]
+password = os.environ["SEED_PASSWORD"]
+slug = os.environ["SEED_WORKSPACE"]
+
+user = User.objects.filter(email=email).first()
+if user is None:
+    user = User.objects.create(
+        email=email, username=uuid.uuid4().hex, display_name="Dev User", first_name="Dev", last_name="User"
+    )
+user.set_password(password)
+user.is_password_autoset = False
+user.is_email_verified = True
+user.save()
+
+profile, _ = Profile.objects.get_or_create(user=user)
+profile.is_onboarded = True
+profile.is_tour_completed = True
+profile.onboarding_step = {
+    "profile_complete": True,
+    "workspace_create": True,
+    "workspace_invite": True,
+    "workspace_join": True,
+}
+
+workspace = Workspace.objects.filter(slug=slug).first()
+if workspace is None:
+    workspace = Workspace.objects.create(slug=slug, name="Dev Workspace", owner=user)
+WorkspaceMember.objects.get_or_create(workspace=workspace, member=user, defaults={"role": 20})
+profile.last_workspace_id = workspace.id
+profile.save()
+
+# God mode: mark the instance configured so email/password sign-in is accepted.
+instance = Instance.objects.last()
+if instance is not None:
+    InstanceAdmin.objects.get_or_create(user=user, instance=instance, defaults={"role": 20})
+    if not instance.is_setup_done:
+        instance.is_setup_done = True
+        instance.is_signup_screen_visited = True
+        instance.save()
+
+# Sample project, so the preview opens on populated screens rather than an
+# empty workspace. module_count stays >= 5: create_module_issues samples 5.
+if not Project.objects.filter(workspace=workspace).exists():
+    create_dummy_data(
+        slug=slug,
+        email=email,
+        members=[],
+        issue_count=40,
+        cycle_count=4,
+        module_count=6,
+        pages_count=6,
+        intake_issue_count=5,
+    )
+
+print(f"seeded {email} in {slug} ({Project.objects.filter(workspace=workspace).count()} project(s))")
+PY
+
+echo "==> Minting a preview session"
+JAR=$(mktemp)
+trap 'rm -f "$JAR"' EXIT
+CSRF=$(curl -s -c "$JAR" http://localhost:8000/auth/get-csrf-token/ |
+  sed -n 's/.*"csrf_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+curl -s -o /dev/null -b "$JAR" -c "$JAR" -X POST http://localhost:8000/auth/sign-in/ \
+  -H "Referer: http://localhost:8000/" \
+  --data-urlencode "csrfmiddlewaretoken=${CSRF}" \
+  --data-urlencode "email=${DEV_EMAIL}" \
+  --data-urlencode "password=${DEV_PASSWORD}"
+SESSION=$(awk '$6 == "session-id" { print $7 }' "$JAR")
+
+if [ -n "$SESSION" ]; then
+  mkdir -p /root/.niteshift/agent-browser
+  printf '%s\n' task-provisioned > /root/.niteshift/agent-browser/auth-strategy
+  cat > /tmp/agent-browser-state.json <<STATE
+{
+  "cookies": [
+    {
+      "name": "session-id",
+      "value": "${SESSION}",
+      "domain": "localhost",
+      "path": "/",
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    }
+  ],
+  "origins": []
+}
+STATE
+  echo "    preview viewers are signed in as ${DEV_EMAIL}"
+else
+  echo "    WARNING: could not mint a session; sign in as ${DEV_EMAIL} / ${DEV_PASSWORD}"
+fi
+
+echo "==> Setup complete"

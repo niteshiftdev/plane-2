@@ -1,0 +1,13 @@
+services:
+  # Postgres, Valkey, RabbitMQ, MinIO, the Django API, the Celery worker and
+  # beat, the migrator, and the Caddy proxy that fronts them all on port 3030.
+  - name: plane-backend
+    command: docker compose -f docker-compose-local.yml -f docker-compose.niteshift.yml up
+    port: 3030
+    stopGracePeriod: 90s
+
+  # turbo dev: web (3000), admin (3001), space (3002) and live (3100).
+  # No port of its own — the proxy in plane-backend publishes them all.
+  - name: plane-frontend
+    command: pnpm dev
+    stopGracePeriod: 30s
