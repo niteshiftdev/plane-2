@@ -15,6 +15,8 @@ cp .niteshift/.env.niteshift .env
 chmod 600 .env
 # Setup consumes the same environment file as the repository services.
 source .env
+# Resolve the committed reference only in this process.
+DEV_PASSWORD="$(ns secrets get "${DEV_PASSWORD#ns://secrets/}")"
 
 COMPOSE=(docker compose -f docker-compose-local.yml -f .niteshift/docker-compose.niteshift.yml)
 
@@ -35,8 +37,8 @@ curl -sf --retry 90 --retry-delay 2 --retry-connrefused --retry-all-errors \
   -o /dev/null http://localhost:8000/api/instances/
 
 echo "==> Seeding the instance"
-"${COMPOSE[@]}" exec -T \
-  -e SEED_EMAIL="$DEV_EMAIL" -e SEED_PASSWORD="$DEV_PASSWORD" -e SEED_WORKSPACE="$DEV_WORKSPACE" \
+SEED_EMAIL="$DEV_EMAIL" SEED_PASSWORD="$DEV_PASSWORD" SEED_WORKSPACE="$DEV_WORKSPACE" \
+  "${COMPOSE[@]}" exec -T -e SEED_EMAIL -e SEED_PASSWORD -e SEED_WORKSPACE \
   api python manage.py shell --settings=plane.settings.local \
   < .niteshift/scripts/seed-dev-instance.py
 

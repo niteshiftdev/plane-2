@@ -37,5 +37,5 @@ if [ -n "$SESSION" ]; then
 STATE
   echo "    preview viewers are signed in as ${DEV_EMAIL}"
 else
-  echo "    WARNING: could not mint a session; sign in as ${DEV_EMAIL} / ${DEV_PASSWORD}"
+  echo "    WARNING: could not mint a session; sign in as ${DEV_EMAIL} with the configured password"
 fi

@@ -10,12 +10,14 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # The root environment file survives suspension and owns the preview account.
 source .env
+# Resolve the committed reference only in this process.
+DEV_PASSWORD="$(ns secrets get "${DEV_PASSWORD#ns://secrets/}")"
 
 echo "==> Waiting for the backend stack"
 ns services start plane-backend
 if ! curl -sf --retry 60 --retry-delay 2 --retry-connrefused --retry-all-errors \
   -o /dev/null http://localhost:8000/api/instances/; then
-  echo "    WARNING: API did not answer; sign in as ${DEV_EMAIL} / ${DEV_PASSWORD}"
+  echo "    WARNING: API did not answer; sign in as ${DEV_EMAIL} with the configured password"
   exit 0
 fi
 
