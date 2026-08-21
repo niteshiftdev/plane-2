@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Niteshift environment setup for the Plane monorepo.
+#
+# This mirrors the documented local workflow (see CONTRIBUTING.md):
+#
+#     ./setup.sh  ->  docker compose -f docker-compose-local.yml up  ->  pnpm dev
+#
+# with two Niteshift adaptations:
+#
+#   * every .env is pointed at a single origin — the Caddy proxy declared in
+#     .niteshift/files/docker-compose.niteshift.yml — so the browser preview
+#     needs exactly one authenticated URL, the way apps/proxy fronts a
+#     production deployment;
+#   * the long-running halves (the Compose stack and `pnpm dev`) live in
+#     .niteshift/services.yaml, so this script only does finite work.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+# Single public origin, served by the proxy on port 4000. Niteshift injects
+# NITESHIFT_PORT_4000_URL once .niteshift/services.yaml is committed; until then
+# derive the same deterministic preview host from the task id, and fall back to
+# localhost outside a sandbox. This origin has to be exact — it ends up in the
+# API's CORS and CSRF trusted origins.
+PROXY_PORT=4000
+BASE_URL="${NITESHIFT_PORT_4000_URL:-}"
+if [ -z "$BASE_URL" ] && [ -n "${NITESHIFT_TASK_ID:-}" ]; then
+  BASE_URL="https://ns-${PROXY_PORT}-${NITESHIFT_TASK_ID#task_}.preview.niteshift.dev"
+fi
+BASE_URL="${BASE_URL:-http://localhost:${PROXY_PORT}}"
+# MinIO hands the browser presigned URLs built from the request scheme; the
+# Niteshift edge terminates TLS, so force https only when the origin is https.
+case "$BASE_URL" in
+  https://*) MINIO_ENDPOINT_SSL=1 ;;
+  *) MINIO_ENDPOINT_SSL=0 ;;
+esac
+
+# Dev-only Django signing key. Fixed rather than generated so that sessions
+# survive setup reruns and resumes; this sandbox is task-local and this value
+# must never be used anywhere else.
+DEV_SECRET_KEY="niteshift-sandbox-dev-only-django-signing-key"
+
+echo "==> Writing .env files (single origin: ${BASE_URL})"
+# Same list setup.sh copies; the appended block wins because every consumer
+# (Docker Compose env_file, dotenv in the Vite configs, node --env-file) keeps
+# the last value for a repeated key.
+for dir in . apps/web apps/admin apps/space apps/live apps/api; do
+  cp "${dir}/.env.example" "${dir}/.env"
+done
+
+cat >> apps/api/.env <<EOF
+
+# ---------------- Niteshift overrides ----------------
+DEBUG=1
+SECRET_KEY="${DEV_SECRET_KEY}"
+# Spelled out because Compose passes env_file values through verbatim, so the
+# \${POSTGRES_USER} style interpolation in .env.example would not expand.
+DATABASE_URL="postgresql://plane:plane@plane-db:5432/plane"
+REDIS_URL="redis://plane-redis:6379/"
+# Also feeds CSRF_TRUSTED_ORIGINS (plane/settings/common.py).
+CORS_ALLOWED_ORIGINS="${BASE_URL},http://localhost:4000,http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3100"
+# Everything is reachable behind the one proxy origin.
+WEB_URL="${BASE_URL}"
+APP_BASE_URL="${BASE_URL}"
+APP_BASE_PATH=""
+ADMIN_BASE_URL="${BASE_URL}"
+ADMIN_BASE_PATH="/god-mode"
+SPACE_BASE_URL="${BASE_URL}"
+SPACE_BASE_PATH="/spaces"
+LIVE_BASE_URL="${BASE_URL}"
+LIVE_BASE_PATH="/live"
+# Uploads are proxied at <origin>/uploads, so presigned URLs stay same-origin.
+USE_MINIO=1
+AWS_S3_ENDPOINT_URL="http://plane-minio:9000"
+MINIO_ENDPOINT_SSL=${MINIO_ENDPOINT_SSL}
+EOF
+
+for dir in apps/web apps/admin apps/space; do
+  cat >> "${dir}/.env" <<'EOF'
+
+# ---------------- Niteshift overrides ----------------
+# Empty base URLs make the browser call the proxy it was served from, which is
+# what the production images do (see apps/web/Dockerfile.web).
+VITE_API_BASE_URL=""
+VITE_WEB_BASE_URL=""
+VITE_ADMIN_BASE_URL=""
+VITE_ADMIN_BASE_PATH="/god-mode"
+VITE_SPACE_BASE_URL=""
+VITE_SPACE_BASE_PATH="/spaces"
+VITE_LIVE_BASE_URL=""
+VITE_LIVE_BASE_PATH="/live"
+EOF
+done
+
+cat >> apps/live/.env <<EOF
+
+# ---------------- Niteshift overrides ----------------
+# The live server runs on the host and talks to the containers over published
+# ports; the browser reaches it at <origin>/live.
+PORT=3100
+API_BASE_URL="http://localhost:8000"
+WEB_BASE_URL="${BASE_URL}"
+LIVE_BASE_URL="${BASE_URL}"
+LIVE_BASE_PATH="/live"
+REDIS_HOST="localhost"
+REDIS_PORT=6379
+REDIS_URL="redis://localhost:6379/"
+EOF
+
+echo "==> Installing Node dependencies"
+corepack enable pnpm
+pnpm install --frozen-lockfile
+
+echo "==> Building workspace packages"
+# `turbo run dev` depends on ^build, so warming these here keeps the first
+# `pnpm dev` from spending minutes compiling before any port opens.
+pnpm turbo run build --filter="./packages/*"
+
+echo "==> Building the API image and pulling the rest of the stack"
+docker compose -f docker-compose-local.yml -f .niteshift/files/docker-compose.niteshift.yml build
+docker compose -f docker-compose-local.yml -f .niteshift/files/docker-compose.niteshift.yml pull --ignore-buildable
+
+# The stack's own migrator applies migrations on the way up, which takes a
+# couple of minutes against an empty database. Doing it here means setup only
+# reports success once the API actually answers.
+echo "==> Starting the stack and waiting for the API"
+ns services start stack
+curl -sf --retry 90 --retry-connrefused --retry-all-errors --retry-delay 5 \
+  -o /dev/null http://localhost:8000/api/instances/
+
+echo "==> Setup complete"
