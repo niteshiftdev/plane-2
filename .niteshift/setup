@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Niteshift environment setup for Plane.
+#
+# Mirrors the documented local workflow (./setup.sh -> docker compose -f
+# docker-compose-local.yml up -> pnpm dev) with two Niteshift adaptations:
+#   * every app is served from a single origin by a Caddy reverse proxy so the
+#     preview panel needs only one port, and
+#   * the instance is pre-configured with a dev user, workspace and sample data.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+echo "==> Materializing root environment file"
+cp .niteshift/files/.env.niteshift .env
+chmod 600 .env
+# Setup consumes the same environment file as the repository services.
+source .env
+# Resolve the committed reference only in this process.
+DEV_PASSWORD="$(ns secrets get "${DEV_PASSWORD#ns://secrets/}")"
+
+COMPOSE=(docker compose -f docker-compose-local.yml -f .niteshift/files/docker-compose.niteshift.yml)
+
+echo "==> Installing node dependencies"
+corepack enable pnpm
+pnpm install --frozen-lockfile
+
+echo "==> Building workspace packages"
+# turbo run dev depends on ^build; pre-building keeps the dev servers fast to start.
+pnpm turbo run build --filter='./packages/*'
+
+echo "==> Building the API image"
+"${COMPOSE[@]}" build
+
+echo "==> Starting the backend stack"
+ns services start plane-backend
+curl -sf --retry 90 --retry-delay 2 --retry-connrefused --retry-all-errors \
+  -o /dev/null http://localhost:8000/api/instances/
+
+echo "==> Seeding the instance"
+SEED_EMAIL="$DEV_EMAIL" SEED_PASSWORD="$DEV_PASSWORD" SEED_WORKSPACE="$DEV_WORKSPACE" \
+  "${COMPOSE[@]}" exec -T -e SEED_EMAIL -e SEED_PASSWORD -e SEED_WORKSPACE \
+  api python manage.py shell --settings=plane.settings.local \
+  < .niteshift/files/seed-dev-instance.py
+
+echo "==> Minting a preview session"
+DEV_EMAIL="$DEV_EMAIL" DEV_PASSWORD="$DEV_PASSWORD" \
+  .niteshift/files/mint-preview-session
+
+echo "==> Setup complete"

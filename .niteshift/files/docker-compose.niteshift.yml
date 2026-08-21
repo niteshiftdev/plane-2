@@ -1,0 +1,11 @@
+services:
+  plane-proxy:
+    image: caddy:2.11.3-alpine
+    restart: unless-stopped
+    # Host networking reaches web, admin, space, and live on loopback.
+    network_mode: host
+    command: caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    volumes:
+      - ./.niteshift/files/Caddyfile.niteshift:/etc/caddy/Caddyfile:ro
+    environment:
+      FILE_SIZE_LIMIT: ${FILE_SIZE_LIMIT:-5242880}

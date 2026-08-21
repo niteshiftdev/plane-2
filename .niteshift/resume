@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Runs on every resume, before services are reconciled.
+#
+# Everything setup produced (env files, images, node_modules, the Postgres
+# volume) survives suspension. Plane sessions do not: SESSION_COOKIE_AGE is
+# seven days, so re-mint the session that signs preview viewers in.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+# The root environment file survives suspension and owns the preview account.
+source .env
+# Resolve the committed reference only in this process.
+DEV_PASSWORD="$(ns secrets get "${DEV_PASSWORD#ns://secrets/}")"
+
+echo "==> Waiting for the backend stack"
+ns services start plane-backend
+if ! curl -sf --retry 60 --retry-delay 2 --retry-connrefused --retry-all-errors \
+  -o /dev/null http://localhost:8000/api/instances/; then
+  echo "    WARNING: API did not answer; sign in as ${DEV_EMAIL} with the configured password"
+  exit 0
+fi
+
+echo "==> Re-minting the preview session"
+DEV_EMAIL="$DEV_EMAIL" DEV_PASSWORD="$DEV_PASSWORD" \
+  .niteshift/files/mint-preview-session

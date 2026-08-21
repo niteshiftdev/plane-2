@@ -1,0 +1,60 @@
+# Models apps/proxy/Caddyfile.ce for the development servers. The proxy uses
+# host networking because the Vite applications bind to loopback.
+{
+	admin off
+	auto_https off
+	servers {
+		max_header_size 25MB
+		client_ip_headers X-Forwarded-For X-Real-IP
+		trusted_proxies static 0.0.0.0/0
+	}
+}
+
+:3030 {
+	request_body {
+		max_size {$FILE_SIZE_LIMIT:5242880}
+	}
+
+	# Django sends X-Frame-Options: DENY, so the proxy replaces it with the
+	# frame-ancestor policy required by the Niteshift preview iframe.
+	header {
+		-X-Frame-Options
+		Content-Security-Policy "frame-ancestors 'self' https://niteshift.dev https://*.niteshift.dev"
+	}
+
+	# Every upstream gets a rewritten Host: Vite refuses unknown hosts, and
+	# Django rejects preview hostnames containing underscores. CORS_ALLOWED_ORIGINS
+	# carries the browser's origin through to Django's CSRF check.
+	redir /god-mode /god-mode/ permanent
+	reverse_proxy /god-mode/* 127.0.0.1:3001 {
+		header_up Host {upstream_hostport}
+	}
+
+	redir /spaces /spaces/ permanent
+	reverse_proxy /spaces/* 127.0.0.1:3002 {
+		header_up Host {upstream_hostport}
+	}
+
+	reverse_proxy /live/* 127.0.0.1:3100 {
+		header_up Host {upstream_hostport}
+	}
+
+	reverse_proxy /api/* 127.0.0.1:8000 {
+		header_up Host localhost:3030
+	}
+
+	reverse_proxy /auth/* 127.0.0.1:8000 {
+		header_up Host localhost:3030
+	}
+
+	reverse_proxy /static/* 127.0.0.1:8000 {
+		header_up Host localhost:3030
+	}
+
+	reverse_proxy /uploads 127.0.0.1:9000
+	reverse_proxy /uploads/* 127.0.0.1:9000
+
+	reverse_proxy /* 127.0.0.1:3000 {
+		header_up Host {upstream_hostport}
+	}
+}
