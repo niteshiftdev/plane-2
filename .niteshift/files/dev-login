@@ -1,0 +1,139 @@
+#!/usr/bin/env node
+/*
+ * Mints a Plane session for the Niteshift preview.
+ *
+ * Declared as `auth: type: cookie-file` in .niteshift/services.yaml. Niteshift
+ * runs it with NITESHIFT_AUTH_STATE_FILE pointing at the browser state file,
+ * then syncs the cookies in it to authorized preview viewers, so the preview
+ * panel opens already signed in.
+ *
+ * It drives the app's own first-run endpoints, the same ones god mode posts to:
+ *   1. POST /api/instances/admins/sign-up/  creates the instance admin
+ *   2. POST /auth/sign-in/                  signs that admin into the web app
+ * Step 1 is a no-op once an admin exists, which is what makes this idempotent
+ * across reruns and resumes.
+ */
+
+const { writeFileSync } = require("node:fs");
+
+// Everything is served from the proxy declared in docker-compose.niteshift.yml.
+// Inside the sandbox that is always localhost; the browser reaches the same
+// origin through the preview URL.
+const PORT = 4000;
+const ORIGIN = `http://localhost:${PORT}`;
+// Dev-only credentials for this task-local instance. Fixed rather than
+// generated so a session survives reruns; never valid anywhere else.
+const EMAIL = "admin@example.com";
+const PASSWORD = "Plane@Dev123";
+const FIRST_NAME = "Plane";
+const LAST_NAME = "Admin";
+
+const STATE_FILE = process.env.NITESHIFT_AUTH_STATE_FILE;
+if (!STATE_FILE) {
+  console.error("NITESHIFT_AUTH_STATE_FILE is not set; nothing to write.");
+  process.exit(1);
+}
+
+// The browser hits the preview host, so the session cookie has to carry that
+// domain. Niteshift injects the URL once services.yaml is committed; before
+// that — and on the task that first adds this file — fall back to the
+// deterministic preview host, which is the task id without its "task_" prefix.
+function previewHost() {
+  const injected = process.env[`NITESHIFT_PORT_${PORT}_URL`];
+  if (injected) return new URL(injected).hostname;
+  const taskId = process.env.NITESHIFT_TASK_ID;
+  return taskId ? `ns-${PORT}-${taskId.replace(/^task_/, "")}.preview.niteshift.dev` : null;
+}
+
+const domains = ["localhost", previewHost()].filter(Boolean);
+
+/** Collect cookies across requests, keyed by name. */
+const jar = new Map();
+
+function absorb(response) {
+  for (const line of response.headers.getSetCookie()) {
+    const [pair] = line.split(";");
+    const index = pair.indexOf("=");
+    if (index > 0) jar.set(pair.slice(0, index).trim(), pair.slice(index + 1).trim());
+  }
+}
+
+function cookieHeader() {
+  return [...jar].map(([name, value]) => `${name}=${value}`).join("; ");
+}
+
+async function post(path, fields) {
+  const response = await fetch(`${ORIGIN}${path}`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Cookie: cookieHeader(),
+      Origin: ORIGIN,
+      Referer: `${ORIGIN}/`,
+      "X-CSRFToken": jar.get("csrftoken") ?? "",
+    },
+    body: new URLSearchParams({ csrfmiddlewaretoken: jar.get("csrftoken") ?? "", ...fields }),
+  });
+  absorb(response);
+  return response;
+}
+
+/** Django redirects on both success and failure; the error rides in the query. */
+function redirectError(response) {
+  const location = response.headers.get("location");
+  if (!location) return null;
+  const params = new URL(location, ORIGIN).searchParams;
+  // error_message is the symbolic name from plane/authentication/adapter/error.py;
+  // error_code is its number.
+  return params.get("error_message") ?? params.get("error_code");
+}
+
+async function main() {
+  const csrf = await fetch(`${ORIGIN}/auth/get-csrf-token/`);
+  if (!csrf.ok) throw new Error(`CSRF token request failed: HTTP ${csrf.status}`);
+  absorb(csrf);
+  if (!jar.has("csrftoken")) throw new Error("No csrftoken cookie was issued.");
+
+  const signUp = await post("/api/instances/admins/sign-up/", {
+    email: EMAIL,
+    password: PASSWORD,
+    first_name: FIRST_NAME,
+    last_name: LAST_NAME,
+    company_name: "Niteshift",
+    is_telemetry_enabled: "False",
+  });
+  const signUpError = redirectError(signUp);
+  if (signUpError && signUpError !== "ADMIN_ALREADY_EXIST") {
+    throw new Error(`Instance admin sign-up failed: ${signUpError}`);
+  }
+  console.log(signUpError ? "Instance admin already exists." : "Created the instance admin.");
+
+  const signIn = await post("/auth/sign-in/", { email: EMAIL, password: PASSWORD });
+  const signInError = redirectError(signIn);
+  if (signInError) throw new Error(`Sign-in failed: ${signInError}`);
+
+  const session = jar.get("session-id");
+  if (!session) throw new Error("Sign-in returned no session cookie.");
+
+  // Playwright storage state. The session key is not bound to a host — Plane
+  // leaves SESSION_COOKIE_DOMAIN unset — so the same value works on both the
+  // in-sandbox origin and the preview host.
+  const cookies = domains.map((domain) => ({
+    name: "session-id",
+    value: session,
+    domain,
+    path: "/",
+    expires: -1,
+    httpOnly: true,
+    secure: false,
+    sameSite: "Lax",
+  }));
+  writeFileSync(STATE_FILE, JSON.stringify({ cookies, origins: [] }, null, 2));
+  console.log(`Wrote a session for ${EMAIL} covering ${domains.join(", ")}.`);
+}
+
+main().catch((error) => {
+  console.error(error.message);
+  process.exit(1);
+});

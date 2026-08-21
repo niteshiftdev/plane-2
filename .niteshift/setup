@@ -19,9 +19,16 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 # Single public origin, served by the proxy on port 4000. Niteshift injects
-# NITESHIFT_PORT_4000_URL once .niteshift/services.yaml is committed; a plain
-# local run falls back to localhost.
-BASE_URL="${NITESHIFT_PORT_4000_URL:-http://localhost:4000}"
+# NITESHIFT_PORT_4000_URL once .niteshift/services.yaml is committed; until then
+# derive the same deterministic preview host from the task id, and fall back to
+# localhost outside a sandbox. This origin has to be exact — it ends up in the
+# API's CORS and CSRF trusted origins.
+PROXY_PORT=4000
+BASE_URL="${NITESHIFT_PORT_4000_URL:-}"
+if [ -z "$BASE_URL" ] && [ -n "${NITESHIFT_TASK_ID:-}" ]; then
+  BASE_URL="https://ns-${PROXY_PORT}-${NITESHIFT_TASK_ID#task_}.preview.niteshift.dev"
+fi
+BASE_URL="${BASE_URL:-http://localhost:${PROXY_PORT}}"
 # MinIO hands the browser presigned URLs built from the request scheme; the
 # Niteshift edge terminates TLS, so force https only when the origin is https.
 case "$BASE_URL" in

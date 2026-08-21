@@ -6,6 +6,11 @@ services:
     command: docker compose -f docker-compose-local.yml -f .niteshift/files/docker-compose.niteshift.yml up
     port: 4000
     stopGracePeriod: 90s
+    # Creates the instance admin through the app's own first-run endpoints and
+    # hands the resulting session to the preview, so it opens signed in.
+    auth:
+      type: cookie-file
+      command: node .niteshift/files/dev-login
 
   # Vite/turbo dev servers: web 3000, admin 3001, spaces 3002, live 3100.
   # They are reached through the proxy above, not directly.
