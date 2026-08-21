@@ -1,0 +1,80 @@
+{
+	# 2019 is reserved by the sandbox and this proxy shares the host's network
+	# namespace, so the admin endpoint has to stay off.
+	admin off
+	auto_https off
+	servers {
+		max_header_size 25MB
+	}
+}
+
+# Single origin for the whole stack, mirroring apps/proxy/Caddyfile.ce: the web
+# app at /, god mode at /god-mode, public sites at /spaces, the live server at
+# /live, Django at /api, /auth and /static, and MinIO at /uploads. Serving all
+# of it from one host is what lets the browser keep using relative URLs.
+:4000 {
+	request_body {
+		max_size 5MB
+	}
+
+	header {
+		# The Niteshift preview panel embeds this origin in an iframe.
+		-X-Frame-Options
+		Content-Security-Policy "frame-ancestors 'self' https://niteshift.dev https://*.niteshift.dev"
+	}
+
+	# Django refuses any Host header that is not valid per RFC 1034/1035 —
+	# underscores included — and a Niteshift preview host inherits the task id,
+	# which may contain one. Those requests reach Django as the loopback host
+	# instead. Requests whose host Django accepts keep it, because MinIO signs
+	# upload URLs with whatever host the API saw.
+	@api_invalid_host {
+		path /api/* /auth/* /static/*
+		header_regexp Host _
+	}
+	handle @api_invalid_host {
+		reverse_proxy 127.0.0.1:8000 {
+			header_up Host {upstream_hostport}
+		}
+	}
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle /auth/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle /static/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	handle /uploads* {
+		reverse_proxy 127.0.0.1:9000
+	}
+
+	handle /live/* {
+		reverse_proxy 127.0.0.1:3100
+	}
+
+	# The Vite dev servers reject unknown Host headers and never build absolute
+	# URLs from one, so they always see their own address.
+	redir /god-mode /god-mode/ permanent
+	handle /god-mode/* {
+		reverse_proxy 127.0.0.1:3001 {
+			header_up Host {upstream_hostport}
+		}
+	}
+
+	redir /spaces /spaces/ permanent
+	handle /spaces/* {
+		reverse_proxy 127.0.0.1:3002 {
+			header_up Host {upstream_hostport}
+		}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up Host {upstream_hostport}
+		}
+	}
+}

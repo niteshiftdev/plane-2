@@ -1,0 +1,13 @@
+# Niteshift-only addition to docker-compose-local.yml: a Caddy reverse proxy
+# that serves web, admin, spaces, live, the API and uploads from a single
+# origin, the same routing apps/proxy/Caddyfile.ce uses in production.
+#
+# It joins the host network so it can reach both the published container ports
+# (API 8000, MinIO 9000) and the Vite dev servers, which bind 127.0.0.1.
+services:
+  niteshift-proxy:
+    image: caddy:2.11.3-alpine
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./.niteshift/files/Caddyfile:/etc/caddy/Caddyfile:ro
