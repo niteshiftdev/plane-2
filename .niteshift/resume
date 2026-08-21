@@ -23,4 +23,4 @@ fi
 
 echo "==> Re-minting the preview session"
 DEV_EMAIL="$DEV_EMAIL" DEV_PASSWORD="$DEV_PASSWORD" \
-  .niteshift/scripts/mint-preview-session
+  .niteshift/files/mint-preview-session

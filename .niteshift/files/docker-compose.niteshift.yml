@@ -6,6 +6,6 @@ services:
     network_mode: host
     command: caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     volumes:
-      - ./.niteshift/Caddyfile.niteshift:/etc/caddy/Caddyfile:ro
+      - ./.niteshift/files/Caddyfile.niteshift:/etc/caddy/Caddyfile:ro
     environment:
       FILE_SIZE_LIMIT: ${FILE_SIZE_LIMIT:-5242880}

@@ -11,14 +11,14 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 echo "==> Materializing root environment file"
-cp .niteshift/.env.niteshift .env
+cp .niteshift/files/.env.niteshift .env
 chmod 600 .env
 # Setup consumes the same environment file as the repository services.
 source .env
 # Resolve the committed reference only in this process.
 DEV_PASSWORD="$(ns secrets get "${DEV_PASSWORD#ns://secrets/}")"
 
-COMPOSE=(docker compose -f docker-compose-local.yml -f .niteshift/docker-compose.niteshift.yml)
+COMPOSE=(docker compose -f docker-compose-local.yml -f .niteshift/files/docker-compose.niteshift.yml)
 
 echo "==> Installing node dependencies"
 corepack enable pnpm
@@ -40,10 +40,10 @@ echo "==> Seeding the instance"
 SEED_EMAIL="$DEV_EMAIL" SEED_PASSWORD="$DEV_PASSWORD" SEED_WORKSPACE="$DEV_WORKSPACE" \
   "${COMPOSE[@]}" exec -T -e SEED_EMAIL -e SEED_PASSWORD -e SEED_WORKSPACE \
   api python manage.py shell --settings=plane.settings.local \
-  < .niteshift/scripts/seed-dev-instance.py
+  < .niteshift/files/seed-dev-instance.py
 
 echo "==> Minting a preview session"
 DEV_EMAIL="$DEV_EMAIL" DEV_PASSWORD="$DEV_PASSWORD" \
-  .niteshift/scripts/mint-preview-session
+  .niteshift/files/mint-preview-session
 
 echo "==> Setup complete"
